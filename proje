@@ -1,0 +1,325 @@
+/*
+ * proje.c
+ *
+ * Created: 11.08.2024 18:18:13
+ * Author : Didem
+ */ 
+
+#include <avr/io.h>
+#define F_CPU 16000000UL
+#include <util/delay.h>
+#include <avr/interrupt.h>
+#include "lcd_i2c.h"
+#include <stdio.h>
+#include <stdlib.h>
+
+#define LCD_ADDRESS 0x27
+
+#define R1 DDB4  // PB3, D12
+#define R2 DDB3  // PB2, D11
+#define R3 DDB2  // PB1, D10
+#define R4 DDB0  // PB0, D8
+#define C1 DDD7  // PD7, D7
+#define C2 DDD6  // PD6, D6
+#define C3 DDD5  // PD5, D5
+
+#define SPEAKER_PIN DDB1
+
+// Define note frequencies in Hz
+#define NOTE_DO  262  // C4
+#define NOTE_RE  294  // D4
+#define NOTE_MI  330  // E4
+#define NOTE_FA  350  // F4
+#define NOTE_SOL 392  // G4
+#define NOTE_LA  440  // A4
+#define NOTE_SI  498  // B4
+#define NOTE_HIGH_DO  524  // C5
+
+int octave = 0;
+int mode = 0;
+volatile uint8_t mode_toggle_flag = 0;
+
+void keypad_init(void) {
+	// Set row pins as outputs
+	DDRB |= (1 << R1) | (1 << R2) | (1 << R3) | (1 << R4);
+	PORTB &= ~((1 << PORTB4) | (1 << PORTB3) | (1 << PORTB2) | (1 << PORTB0));
+	
+	// Set column pins as inputs with pull-up resistors
+	DDRD &= ~((1 << C1) | (1 << C2) | (1 << C3));
+	PORTD |= (1 << PORTD7) | (1 << PORTD6) | (1 << PORTD5);
+	
+	// Enable pin change interrupt on columns (PCINT23-16 corresponds to PD7-PD0)
+	PCICR |= (1 << PCIE2);  // Enable pin change interrupt for PCINT[23:16] (PORTD)
+	PCMSK2 |= (1 << PCINT23) | (1 << PCINT22) | (1 << PCINT21);  // Enable interrupt for PD7, PD6, and PD5
+}
+
+void play_note(uint16_t base_frequency) {
+	uint16_t frequency;
+
+	if (octave >= 0) {
+		frequency = base_frequency << octave;  // Increase octave
+		} else {
+		frequency = base_frequency >> (-octave);  // Decrease octave
+	}
+	ICR1 = F_CPU / (2 * 8 * frequency) - 1;  // Set top value for the frequency
+	OCR1A = ICR1 / 2;
+}
+
+void stop_note(void) {
+	OCR1A = 0;  // Set duty cycle to 0%
+}
+
+void play_other_sound(uint8_t key) {
+	switch (key) {
+
+		case 1:  // Key 1 - Beep
+			OCR1A = ICR1 / 2;
+			_delay_ms(100);
+			OCR1A = 0;
+			break;
+		case 2:  // Key 2 - Double Beep
+			OCR1A = ICR1 / 2;
+			_delay_ms(100);
+			OCR1A = 0;
+			_delay_ms(100);
+			OCR1A = ICR1 / 2;
+			_delay_ms(100);
+			OCR1A = 0;
+			break;
+
+		case 3:  // Key 4 - Siren
+			for (int i = 0; i < 3; i++) {
+				play_note(NOTE_DO);
+				_delay_ms(300);
+				play_note(NOTE_RE);
+				_delay_ms(300);
+				play_note(NOTE_MI);
+				_delay_ms(300);
+			}
+			OCR1A = 0;
+			break;
+		case 4:  // Key 8 - Random Noise
+			for (int i = 0; i < 100; i++) {
+				uint16_t freq = 200 + (rand() % 1800);  // Random frequency between 200 Hz and 2000 Hz
+				ICR1 = F_CPU / (2 * 8 * freq) - 1;
+				OCR1A = ICR1 / 2;
+				_delay_ms(20);
+			}
+			OCR1A = 0;
+			break;
+
+		default:
+			break;
+	}
+}
+
+// Interrupt service routine for pin change interrupt
+ISR(PCINT2_vect) {
+	uint8_t key=0;
+	const char *sound = "";
+	const char *key_label = "";
+	
+// ------------------------------------------------------------------------- First Row
+	PORTB &= ~(1 << PORTB4);	// 1st row low
+	_delay_ms(10);
+	if (~PIND & (1 << PIND7)) {	// 1
+		key = 1;
+		key_label = "1";
+		
+		if (mode == 0) {
+			play_note(NOTE_DO);
+			sound = "DO";  
+			} else {
+			play_other_sound(1);
+			sound = "beep";
+		}
+	}
+	if(~PIND & (1<<PIND6)) {	// 2
+		key=2;
+		key_label = "2";
+		
+		if (mode == 0) {
+			play_note(NOTE_RE);
+			sound = "RE";
+			} else {
+			play_other_sound(2);
+			sound = "double";
+		}
+	}
+	if(~PIND & (1<<PIND5)) {	// 3
+		key=3;
+		key_label = "3";
+		
+		if (mode == 0) {
+			play_note(NOTE_MI);
+			sound = "MI";
+			} else {
+			play_other_sound(3);
+			sound = "Siren";
+		}
+	} 
+	PORTB |= (1 << PORTB4);		// Set 1st row back high
+	
+// ------------------------------------------------------------------------------------ Second Row
+	PORTB &= ~(1 << PORTB3);	// 2nd row low
+	_delay_ms(10);
+	if(~PIND & (1<<PIND7)) {	// 4
+		key=4;
+		key_label = "4";
+		
+		if (mode == 0) {
+			play_note(NOTE_FA);
+			sound = "FA";
+			} else {
+			play_other_sound(4);
+			sound = "Noise";
+		}
+	} 
+	if(~PIND & (1<<PIND6)) {	// 5
+		key=5;
+		key_label = "5";
+		
+		if (mode == 0) {
+			play_note(NOTE_SOL);
+			sound = "FA";
+			} else {
+			play_other_sound(1);
+		}
+	} 
+	if(~PIND & (1<<PIND5)) {	// 6
+		key=6;
+		key_label = "6";
+		
+		if (mode == 0) {
+			play_note(NOTE_LA);
+			sound = "LA";
+			} else {
+				stop_note();
+		}
+	} 
+	PORTB |= (1 << PORTB3);		// Set 2nd row back high
+		
+// ---------------------------------------------------------------------------- Third Row
+	PORTB &= ~(1 << PORTB2);	// 3rd row low
+	_delay_ms(10);
+	if(~PIND & (1<<PIND7)) {	// 7
+		key=7;
+		key_label = "7";
+		
+		if (mode == 0) {
+			play_note(NOTE_SI);
+			sound = "SI";
+			} else {
+				stop_note();
+		}
+	} 
+	if(~PIND & (1<<PIND6)) {	// 8
+		key=8;
+		key_label = "8";
+		
+		if (mode == 0) {
+			play_note(NOTE_HIGH_DO);
+			sound = "DO";
+			} else {
+				stop_note();
+		}
+	} 
+	if(~PIND & (1<<PIND5)) {	// 9
+		stop_note(); key=9; key_label = "9"; sound = "-";
+	} 
+	PORTB |= (1 << PORTB2);			// Set 3rd row back high
+		
+// ------------------------------------------------------------------------------------ Fourth Row
+	PORTB &= ~(1 << PORTB0);		// 4th row low
+	_delay_ms(10);
+	if (~PIND & (1 << PIND7)) {	// *
+		key = 0x2A;
+		if (octave < 3) {			// Limit the maximum octave shift to avoid too high frequencies
+			octave++;
+		}
+		sound = "Higher Octave";
+	} 
+	if (~PIND & (1 << PIND6)) {	// 0
+		key = 0x30;
+		mode_toggle_flag = 1;
+		sound = "Mode Toggle";
+		_delay_ms(200);
+	} 
+	if (~PIND & (1 << PIND5)) {	// #
+		key = 0x23;
+		if (octave > -3) {			// Limit the minimum octave shift to avoid too low frequencies
+			octave--;
+		}
+		sound = "Lower Octave";
+	} 
+	PORTB |= (1 << PORTB0);  // Set 4th row back high
+	
+	char buffer1[16];
+	char buffer2[16];
+		
+	if (key != 0) {
+		sprintf(buffer1, "Key:%s", key_label);
+		sprintf(buffer2, "Sound:%s", sound);
+		
+		lcd_clear();  // Clear the LCD screen
+		lcd_setCursor(0, 0);  // Set cursor to the first row, first column
+		lcd_print(buffer1);  // Print the pressed key on the LCD
+		lcd_setCursor(0, 1);
+		lcd_print(buffer2);
+		_delay_ms(200);  // Play the note for 1 second
+		stop_note();  // Stop the note
+	}
+	 	
+	PORTB &= ~((1 << PORTB4) | (1 << PORTB3) | (1 << PORTB2) | (1 << PORTB0)); // All rows low
+	_delay_ms(50); // Wait for debouncing				
+}
+
+
+
+int main(void)
+{
+	/* Replace with your application code */
+	
+	// Setting up I2C Pins
+	DDRC = ((1<<DDC4)|(1<<DDC5));
+	PORTC = ((1<<PORTC4)|(1<<PORTC5));
+	
+	keypad_init();
+	sei();
+	
+	DDRB |= (1 << SPEAKER_PIN);
+	TCCR1A |= (1 << WGM11) | (1 << COM1A1);
+	TCCR1B |= (1 << WGM13) | (1 << WGM12) | (1 << CS11);
+	
+	lcd_initializer myLCD = {
+		.device.slave_address = LCD_ADDRESS,  // I2C address of the LCD
+		.device.baud_rate = F_100kHz,  // I2C baud rate of 100kHz
+		.rows = 2,                     // 2 rows
+		.columns = 16,                 // 16 columns
+		.dot_size = LCD_5x8DOTS        // 5x8 dot matrix
+	};
+
+	// Initialize LCD with the settings
+	lcd_init(myLCD);
+	_delay_ms(50);
+	
+	lcd_clear();
+	lcd_backlight();
+		
+	while (1)
+	{
+		if (mode_toggle_flag) {
+			cli();  // Disable interrupts to safely toggle the mode
+			mode = !mode;  // Toggle the mode
+			mode_toggle_flag = 0;  // Clear the flag after handling
+			sei();  // Re-enable interrupts
+			
+			lcd_clear();
+			lcd_setCursor(0, 0);
+			lcd_print(mode == 0 ? "Notes Mode" : "Other Sounds Mode");
+			_delay_ms(1000);
+		}		
+		
+	}
+}
+
